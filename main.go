@@ -2,22 +2,26 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"time"
 )
 
 type stageSignature func(done, input chan int) chan int
 
 // Обработка входящего потока данных, фильтрация и передача дальше другим сдатия конвейера
-func worker(done, out, input chan int, predicate func(v int) bool) {
+func worker(label string, done, out, input chan int, predicate func(v int) bool) {
+	defer log.Printf("Завершение стадии обработки: %s", label)
 	defer close(out)
 	for {
 		select {
 		case <-done:
+
 			return
 		case v, isChannelOpen := <-input:
 			if !isChannelOpen {
 				return
 			}
+			log.Printf("Фильтация данных стадией %s значения %d", label, v)
 			if predicate(v) {
 				select {
 				case out <- v:
@@ -30,31 +34,36 @@ func worker(done, out, input chan int, predicate func(v int) bool) {
 }
 
 // По сути мини-фабрика для создания стадий обработки
-func makeStage(predicate func(v int) bool) stageSignature {
+func makeStage(label string, predicate func(v int) bool) stageSignature {
+	log.Printf("Создания стадии: %s", label)
 	return func(done, input chan int) chan int {
 		out := make(chan int)
-		go worker(done, out, input, predicate)
+		go worker(label, done, out, input, predicate)
 		return out
 	}
 }
 
 // Финальная стадия обработки данных через буферизацию
-func loopBuffer(done, input chan int) chan int {
-	out := make(chan int)
-	// В качестве кольцевого буфера использован буферизированный канал так-как он и реализует принцип FIFO
-	buffer := make(chan int, BUFFER_SIZE)
+func loopBuffer(label string) stageSignature {
+	return func(done, input chan int) chan int {
+		out := make(chan int)
+		// В качестве кольцевого буфера использован буферизированный канал так-как он и реализует принцип FIFO
+		buffer := make(chan int, BUFFER_SIZE)
 
-	go worker(done, buffer, input, func(v int) bool { return true })
+		go worker(label, done, buffer, input, func(v int) bool { return true })
 
-	go func() {
-		defer close(out)
-		for v := range buffer {
-			time.Sleep(time.Millisecond * BUFFER_DELAY)
-			out <- v
-		}
-	}()
+		log.Println("Запускается отдельная горутина для работы с кольцевым буфером")
+		go func() {
+			defer close(out)
+			for v := range buffer {
+				time.Sleep(time.Millisecond * BUFFER_DELAY)
+				log.Println("Запись обработанных данных в канал для итоговой печати в консоль")
+				out <- v
+			}
+		}()
 
-	return out
+		return out
+	}
 }
 
 // Размер кольцевого буфера
@@ -65,18 +74,26 @@ const BUFFER_DELAY = 100
 
 func main() {
 
+	log.Println("Подготовка перед добавлением стадий обработки")
 	// Для удобной организации стадий
 	stages := make([]stageSignature, 0)
-	appendToStages := func(stage stageSignature) {
-		stages = append(stages, stage)
+	appendToStages := func(label string, done func(label string) stageSignature) {
+		log.Printf("Добавление стадии: %s", label)
+		stages = append(stages, done(label))
 	}
 
 	// Добавляем стадию фильтрации отрицательных значений
-	appendToStages(makeStage(func(v int) bool { return v >= 0 }))
+	appendToStages("Фильтрация отрицательных значений", func(label string) stageSignature {
+		return makeStage(label, func(v int) bool { return v >= 0 })
+	})
 	// Добавляем стадию фильтрации значений не делящихся на 3 и равных 0
-	appendToStages(makeStage(func(v int) bool { return v != 0 && v%3 == 0 }))
+	appendToStages("Фильтрация значений не делящихся на 3 и равных 0", func(label string) stageSignature {
+		return makeStage(label, func(v int) bool { return v != 0 && v%3 == 0 })
+	})
 	// Добавляем финальную стадию обработки данных через буферизацию
-	appendToStages(loopBuffer)
+	appendToStages("Кольцевой буффер", func(label string) stageSignature {
+		return loopBuffer(label)
+	})
 
 	// Для сигнализации всем конвейерам остановиться
 	done := make(chan int)
@@ -92,17 +109,21 @@ func main() {
 	}
 
 	// Запускаем отдельную горутину для получние данных из консоли
+	log.Println("Запускается отдельная горутина для получние данных из консоли")
 	go func() {
 		defer close(source)
 
 		var input int
 
 		for {
+			log.Println("Ожидаем ввод данных их консоли")
 			if _, err := fmt.Scanln(&input); err == nil {
 				// Если было получено число, то отправляем его в канал для обработки конвейером
+				log.Println("Запись полученных данных в канал для обработки конвейером")
 				source <- input
 			} else {
 				// Завершаем цикл обработки ввода данных если получено нечисловое значение
+				log.Println("Завершение цикла обработки ввода данных")
 				return
 			}
 		}
@@ -111,6 +132,7 @@ func main() {
 
 	// Пишем в консоль обработанные данные
 	for v := range pipe {
+		log.Println("Запись в консоль обработанных данных")
 		fmt.Printf("Обработаны данные: %d\n", v)
 	}
 
